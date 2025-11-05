@@ -34,6 +34,11 @@ EXT_TO_LANG = {
     "xml": "XML",
     "ini": "INI",
     "toml": "TOML",
+    "html": "HTML", 
+    "htm": "HTML",
+    "css": "CSS",
+    "dart": "Dart",
+    "swift": "Swift"
 }
 
 NON_CODE_LANGS = {"Markdown", "CSV"}
@@ -88,11 +93,13 @@ class ADO:
     def list_files(self, project_id, repo_id, branch_name):
         base = f"{self.org_url}/{project_id}/_apis/git/repositories/{repo_id}/items"
         url = (f"{base}?recursionLevel=Full&includeContentMetadata=true"
+               f"&versionDescriptor.versionType=branch"
                f"&versionDescriptor.version={quote(branch_name)}"
                f"&api-version={API_VER}")
         for item in self.paged(url):
             if not item.get("isFolder", False) and item.get("gitObjectType") == "blob":
-                size = int(item.get("size", 0) or 0)
+                # Since API returns size=0, use 1 for file count
+                size = 1
                 path = item.get("path")
                 if path is not None:
                     yield {"path": path, "size": size}
@@ -139,10 +146,11 @@ def parse_args():
     p.add_argument("--out", default="out/", help="Output directory for CSVs")
     p.add_argument("--org-url", default=os.environ.get("ADO_ORG_URL"), help="Azure DevOps org URL")
     p.add_argument("--pat", default=os.environ.get("ADO_PAT"), help="PAT with Code (Read) scope")
+    p.add_argument("--project", default=os.environ.get("ADO_PROJECT"), help="Process only this project name (optional)")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--since-days", type=int, default=int(os.environ.get("FILTER_SINCE_DAYS", "0")),
+    g.add_argument("--since-days", type=int, default=0,
                    help="Filter to files changed since N days ago")
-    g.add_argument("--since-iso", default=os.environ.get("FILTER_SINCE_ISO"),
+    g.add_argument("--since-iso", default=None,
                    help="Filter to files changed since YYYY-MM-DD")
     p.add_argument("--created-only", action="store_true",
                    default=os.environ.get("FILTER_CREATED_ONLY","false").lower()=="true",
@@ -188,6 +196,13 @@ def main():
     projects = ado.list_projects()
     print(f"Found {len(projects)} projects")
 
+    if args.project:
+        projects = [p for p in projects if p["name"] == args.project]
+        if not projects:
+            print(f"Project '{args.project}' not found.", file=sys.stderr)
+            return 1
+        print(f"Filtering to project: {args.project}")
+
     for p in projects:
         proj_id = p["id"]
         proj_name = p["name"]
@@ -197,7 +212,9 @@ def main():
         for repo in repos:
             repo_name = repo["name"]
             default_branch = repo.get("defaultBranch")
+            print(f"  - Processing repo: {repo_name}")
             if not default_branch:
+                print(f"    No default branch found for {repo_name}, skipping.")
                 per_repo_rows.append({
                     "project": proj_name,
                     "repository": repo_name,
@@ -208,24 +225,32 @@ def main():
                 continue
 
             branch_name = default_branch.replace("refs/heads/","")
+            print(f"    Default branch: {branch_name}")
 
             # optional recent filter
             recent_paths = None
             if since_iso:
+                print(f"    Filtering files changed since {since_iso}")
                 commits = ado.list_commits(proj_id, repo["id"], branch_name, since_iso)
                 commit_ids = [c["commitId"] for c in commits]
+                print(f"    Found {len(commit_ids)} commits since {since_iso}")
                 if commit_ids:
                     recent_paths = ado.list_changed_paths_for_commits(
                         proj_id, repo["id"], commit_ids, created_only=args.created_only
                     )
+                    print(f"    Found {len(recent_paths)} changed paths")
                 else:
                     recent_paths = set()
+                    print("    No commits found, no recent paths")
 
             lang_bytes = Counter()
             total_bytes = 0
+            file_count = 0
 
             try:
+                print(f"    Listing files in {repo_name}...")
                 for item in ado.list_files(proj_id, repo["id"], branch_name):
+                    file_count += 1
                     if recent_paths is not None and item["path"] not in recent_paths:
                         continue
                     size = item["size"]
@@ -233,11 +258,13 @@ def main():
                     ext = ext_from_path(item["path"])
                     lang = lang_from_ext(ext)
                     lang_bytes[lang] += size
+                print(f"    Found {file_count} files, total bytes: {total_bytes}")
             except requests.HTTPError as e:
-                print(f"  ! Error listing files for {proj_name}/{repo_name}: {e}", file=sys.stderr)
+                print(f"    ! Error listing files for {proj_name}/{repo_name}: {e}", file=sys.stderr)
                 continue
 
             if total_bytes == 0:
+                print(f"    No files or bytes found for {repo_name}")
                 per_repo_rows.append({
                     "project": proj_name,
                     "repository": repo_name,
@@ -246,6 +273,7 @@ def main():
                     "bytes": 0
                 })
             else:
+                print(f"    Languages found: {dict(lang_bytes)}")
                 for lang, b in lang_bytes.items():
                     per_repo_rows.append({
                         "project": proj_name,
@@ -255,7 +283,7 @@ def main():
                         "bytes": b
                     })
                     tenant_totals[lang] += b
-                    if (not args.exclude_non_code) or (lang not in {{"Markdown","CSV"}}):
+                    if (not args.exclude_non_code) or (lang not in NON_CODE_LANGS):
                         tenant_totals_code_only[lang] += b
 
     # Write CSVs
