@@ -1,0 +1,31 @@
+name: Run ADO Lang Inspector
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run scan
+        env:
+          ADO_ORG_URL: ${{ secrets.ADO_ORG_URL }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          FILTER_SINCE_DAYS: ${{ vars.FILTER_SINCE_DAYS }}
+          FILTER_SINCE_ISO: ${{ vars.FILTER_SINCE_ISO }}
+          FILTER_CREATED_ONLY: ${{ vars.FILTER_CREATED_ONLY }}
+          EXCLUDE_NON_CODE: ${{ vars.EXCLUDE_NON_CODE }}
+        run: python -m src.ado_lang_inspector --out out/
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ado-lang-stats
+          path: out/*
